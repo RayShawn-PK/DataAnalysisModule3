@@ -29,6 +29,26 @@ USE coffeeshop_db;
 -- Use a window function for the rolling average.
 -- Sort by store_name, order_date.
 
+WITH daily_revenue AS(
+	  SELECT o.store_id, o.order_datetime,
+           SUM(p.price*oi.quantity) AS daily_revenue
+    FROM products p
+    JOIN order_items oi ON p.product_id = oi.product_id
+    JOIN orders o ON oi.order_id = o.order_id
+    GROUP BY store_id, order_datetime
+),
+store_average AS (
+    SELECT AVG(daily_revenue) AS average_revenue
+    FROM daily_revenue
+)
+SELECT dr.store_id,
+	   dr.order_datetime,
+       dr.daily_revenue,
+       sa.average_revenue
+FROM daily_revenue dr
+CROSS JOIN store_average sa
+WHERE dr.daily_revenue > sa.average_revenue;
+
 -- =========================================================
 -- Q3) Window function: Rank customers by lifetime spend (PAID only)
 -- =========================================================
@@ -38,6 +58,16 @@ USE coffeeshop_db;
 -- Also include percent_of_total = customer's total_spend / total spend of all customers.
 -- Sort by total_spend DESC.
 
+SELECT 
+	o.customer_id, 
+	CONCAT(c.first_name, ' ', c.last_name) AS customer_name, 
+    SUM(oi.quantity) AS total_spend, 
+    DENSE_RANK() OVER (ORDER BY SUM(total_spend) DESC) AS spend_rank
+FROM orders o
+LEFT JOIN customers c ON o.customer_id = c.customer_id
+LEFT JOIN order_items oi ON o.order_id = oi.order_id
+GROUP BY customer_name;
+
 -- =========================================================
 -- Q4) CTE + window: Top product per store by revenue (PAID only)
 -- =========================================================
@@ -46,7 +76,7 @@ USE coffeeshop_db;
 -- Return: store_name, product_name, category_name, product_revenue.
 -- Use a CTE to compute product_revenue, then a window function (ROW_NUMBER)
 -- partitioned by store to select the top 1.
--- Sort by store_name.
+-- Sort by store_name. 
 
 -- =========================================================
 -- Q5) Subquery: Customers who have ordered from ALL stores (PAID only)
@@ -102,3 +132,4 @@ USE coffeeshop_db;
 --   on_hand < total_units_sold
 -- Return: store_name, product_name, on_hand, total_units_sold, units_gap (= total_units_sold - on_hand)
 -- Sort by units_gap DESC.
+

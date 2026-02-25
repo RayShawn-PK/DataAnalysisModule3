@@ -96,10 +96,38 @@ WHERE e.title = 'Manager';
 
 -- Q8) Using a subquery/CTE: list products whose total PAID revenue is above
 --     the average PAID product revenue. Return product_name, total_revenue.
+SELECT p.name AS product_name, SUM(p.price) AS total_revenue
+FROM products p
+LEFT JOIN order_items oi ON p.product_id = oi.product_id
+LEFT JOIN orders o ON oi.order_id = o.order_id
+WHERE status = 'paid' AND
+price > (
+	SELECT AVG(price)
+	FROM products
+    )
+GROUP BY product_name
+;
 
 -- Q9) Churn-ish check: list customers with their last PAID order date.
 --     If they have no PAID orders, show NULL.
 --     Hint: Put the status filter in the LEFT JOIN's ON clause to preserve non-buyer rows.
+WITH OrderRank AS(
+	SELECT
+		o.customer_id,
+        o.order_id,
+        o.status,
+        o.order_datetime,
+        ROW_NUMBER() OVER(
+			PARTITION BY o.customer_id
+            ORDER BY o.order_datetime DESC
+		) AS ord
+	FROM orders o
+)
+SELECT CONCAT(c.first_name, ' ', c.last_name) AS customer_name, r.order_datetime AS order_date
+FROM customers c
+LEFT JOIN OrderRank r ON c.customer_id = r.customer_id AND r.ord = '1'
+;
+
 
 -- Q10) Product mix report (PAID only):
 --     For each store and category, show total units and total revenue (= SUM(quantity * products.price)).
