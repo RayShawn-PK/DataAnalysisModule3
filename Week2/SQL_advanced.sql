@@ -18,6 +18,52 @@ USE coffeeshop_db;
 -- for THAT SAME store (correlated subquery).
 -- Sort by store_name, then order_total DESC.
 
+WITH paid_order_totals AS (
+    SELECT
+        o.order_id,
+        o.store_id,
+        CONCAT(c.first_name, ' ', c.last_name) AS customer_name,
+        s.name AS store_name,
+        o.order_datetime,
+        SUM(oi.quantity * p.price) AS order_total
+    FROM orders o
+    JOIN order_items oi
+        ON o.order_id = oi.order_id
+    JOIN products p
+        ON oi.product_id = p.product_id
+    JOIN customers c
+        ON o.customer_id = c.customer_id
+    JOIN stores s
+        ON o.store_id = s.store_id
+    WHERE o.status = 'paid'
+    GROUP BY
+        o.order_id,
+        o.store_id,
+        customer_name,
+        store_name,
+        o.order_datetime
+),
+
+store_avg AS (
+    SELECT
+        store_id,
+        AVG(order_total) AS avg_order_total
+    FROM paid_order_totals
+    GROUP BY store_id
+)
+
+SELECT
+    pot.order_id,
+    pot.customer_name,
+    pot.store_name,
+    pot.order_datetime,
+    pot.order_total
+FROM paid_order_totals pot
+JOIN store_avg sa
+    ON pot.store_id = sa.store_id
+WHERE pot.order_total > sa.avg_order_total
+ORDER BY pot.store_name, pot.order_total DESC;
+
 -- =========================================================
 -- Q2) CTE: Daily revenue and 3-day rolling average (PAID only)
 -- =========================================================
@@ -58,15 +104,33 @@ WHERE dr.daily_revenue > sa.average_revenue;
 -- Also include percent_of_total = customer's total_spend / total spend of all customers.
 -- Sort by total_spend DESC.
 
-SELECT 
-	o.customer_id, 
-	CONCAT(c.first_name, ' ', c.last_name) AS customer_name, 
-    SUM(oi.quantity) AS total_spend, 
-    DENSE_RANK() OVER (ORDER BY SUM(total_spend) DESC) AS spend_rank
-FROM orders o
-LEFT JOIN customers c ON o.customer_id = c.customer_id
-LEFT JOIN order_items oi ON o.order_id = oi.order_id
-GROUP BY customer_name;
+WITH customer_spend AS (
+    SELECT
+        c.customer_id,
+        CONCAT(c.first_name, ' ', c.last_name) AS customer_name,
+        SUM(oi.quantity * p.price) AS total_spend
+    FROM customers c
+    JOIN orders o
+        ON c.customer_id = o.customer_id
+    JOIN order_items oi
+        ON o.order_id = oi.order_id
+    JOIN products p
+        ON oi.product_id = p.product_id
+    WHERE o.status = 'paid'
+    GROUP BY
+        c.customer_id,
+        c.first_name,
+        c.last_name
+)
+
+SELECT
+    customer_id,
+    customer_name,
+    total_spend,
+    DENSE_RANK() OVER (ORDER BY total_spend DESC) AS spend_rank,
+    total_spend / SUM(total_spend) OVER () AS percent_of_total
+FROM customer_spend
+ORDER BY total_spend DESC;
 
 -- =========================================================
 -- Q4) CTE + window: Top product per store by revenue (PAID only)
@@ -78,12 +142,70 @@ GROUP BY customer_name;
 -- partitioned by store to select the top 1.
 -- Sort by store_name. 
 
+WITH product_revenue AS (
+    SELECT
+        s.store_id,
+        s.name AS store_name,
+        p.product_id,
+        p.name AS product_name,
+        c.name AS category_name,
+        SUM(oi.quantity * p.price) AS product_revenue
+    FROM orders o
+    JOIN order_items oi
+        ON o.order_id = oi.order_id
+    JOIN products p
+        ON oi.product_id = p.product_id
+    JOIN categories c
+        ON p.category_id = c.category_id
+    JOIN stores s
+        ON o.store_id = s.store_id
+    WHERE o.status = 'paid'
+    GROUP BY
+        s.store_id,
+        s.name,
+        p.product_id,
+        p.name,
+        c.name
+)
+
+SELECT
+    store_name,
+    product_name,
+    category_name,
+    product_revenue
+FROM (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY store_id
+            ORDER BY product_revenue DESC
+        ) AS rn
+    FROM product_revenue
+) ranked
+WHERE rn = 1
+ORDER BY store_name;
 -- =========================================================
 -- Q5) Subquery: Customers who have ordered from ALL stores (PAID only)
 -- =========================================================
 -- Return customers who have at least one PAID order in every store in the stores table.
 -- Return: customer_id, customer_name.
 -- Hint: Compare count(distinct store_id) per customer to (select count(*) from stores).
+
+SELECT
+    c.customer_id,
+    CONCAT(c.first_name, ' ', c.last_name) AS customer_name
+FROM customers c
+JOIN orders o
+    ON c.customer_id = o.customer_id
+WHERE o.status = 'paid'
+GROUP BY
+    c.customer_id,
+    c.first_name,
+    c.last_name
+HAVING COUNT(DISTINCT o.store_id) = (
+    SELECT COUNT(*)
+    FROM stores
+);
 
 -- =========================================================
 -- Q6) Window function: Time between orders per customer (PAID only)
@@ -95,6 +217,37 @@ GROUP BY customer_name;
 -- Only show rows where prev_order_datetime is NOT NULL.
 -- Sort by customer_name, order_datetime.
 
+WITH paid_orders AS (
+    SELECT
+        o.order_id,
+        o.customer_id,
+        CONCAT(c.first_name, ' ', c.last_name) AS customer_name,
+        o.order_datetime
+    FROM orders o
+    JOIN customers c
+        ON o.customer_id = c.customer_id
+    WHERE o.status = 'paid'
+)
+
+SELECT
+    customer_name,
+    order_id,
+    order_datetime,
+    prev_order_datetime,
+    TIMESTAMPDIFF(MINUTE, prev_order_datetime, order_datetime) AS minutes_since_prev
+FROM (
+    SELECT
+        *,
+        LAG(order_datetime) OVER (
+            PARTITION BY customer_id
+            ORDER BY order_datetime
+        ) AS prev_order_datetime
+    FROM paid_orders
+) t
+WHERE prev_order_datetime IS NOT NULL
+ORDER BY
+    customer_name,
+    order_datetime;
 -- =========================================================
 -- Q7) View: Create a reusable order line view for PAID orders
 -- =========================================================
@@ -110,6 +263,40 @@ GROUP BY customer_name;
 -- where revenue is SUM(line_total),
 -- sorted by revenue DESC.
 
+CREATE VIEW v_paid_order_lines AS
+SELECT
+	oi.order_item_id,
+    o.order_id,
+    o.order_datetime,
+    s.store_id,
+    s.name AS store_name,
+    o.customer_id,
+    CONCAT(c.first_name, ' ', c.last_name) AS customer_name,
+    p.product_id, 
+    p.name AS product_name,
+    p.category_id AS category_name,
+    oi.quantity, 
+    p.price AS unit_price,
+    oi.quantity * p.price AS line_total
+FROM orders o
+JOIN order_items oi 
+    ON o.order_id = oi.order_id
+JOIN stores s 
+    ON o.store_id = s.store_id
+JOIN customers c 
+    ON o.customer_id = c.customer_id
+JOIN products p 
+    ON oi.product_id = p.product_id
+WHERE o.status = 'PAID';
+
+    
+SELECT
+    store_name,
+    category_name,
+    SUM(line_total) AS revenue
+FROM v_paid_order_lines
+GROUP BY store_name, category_name
+ORDER BY revenue DESC;
 -- =========================================================
 -- Q8) View + window: Store revenue share by payment method (PAID only)
 -- =========================================================
@@ -123,6 +310,35 @@ GROUP BY customer_name;
 --   pct_of_store_revenue (= revenue / store_total_revenue)
 -- Sort by store_name, revenue DESC.
 
+CREATE VIEW v_paid_store_payments AS
+SELECT
+    s.store_id,
+    s.name AS store_name,
+    o.payment_method,
+    SUM(oi.quantity * p.price) AS revenue
+FROM orders o
+JOIN order_items oi 
+    ON o.order_id = oi.order_id
+JOIN products p 
+    ON oi.product_id = p.product_id
+JOIN stores s 
+    ON o.store_id = s.store_id
+WHERE o.status = 'PAID'
+GROUP BY
+    s.store_id,
+    s.name,
+    o.payment_method;
+    
+SELECT
+    store_name,
+    payment_method,
+    revenue,
+    SUM(revenue) OVER (PARTITION BY store_id) AS store_total_revenue,
+    revenue / SUM(revenue) OVER (PARTITION BY store_id) AS pct_of_store_revenue
+FROM v_paid_store_payments
+ORDER BY
+    store_name,
+    revenue DESC;
 -- =========================================================
 -- Q9) CTE: Inventory risk report (low stock relative to sales)
 -- =========================================================
@@ -133,3 +349,33 @@ GROUP BY customer_name;
 -- Return: store_name, product_name, on_hand, total_units_sold, units_gap (= total_units_sold - on_hand)
 -- Sort by units_gap DESC.
 
+WITH paid_sales AS (
+    SELECT
+        o.store_id,
+        oi.product_id,
+        SUM(oi.quantity) AS total_units_sold
+    FROM orders o
+    JOIN order_items oi
+        ON o.order_id = oi.order_id
+    WHERE o.status = 'paid'
+    GROUP BY
+        o.store_id,
+        oi.product_id
+)
+
+SELECT
+    s.name AS store_name,
+    p.name AS product_name,
+    i.on_hand,
+    ps.total_units_sold,
+    (ps.total_units_sold - i.on_hand) AS units_gap
+FROM inventory i
+JOIN paid_sales ps
+    ON i.store_id = ps.store_id
+   AND i.product_id = ps.product_id
+JOIN stores s
+    ON i.store_id = s.store_id
+JOIN products p
+    ON i.product_id = p.product_id
+WHERE i.on_hand < ps.total_units_sold
+ORDER BY units_gap DESC;
